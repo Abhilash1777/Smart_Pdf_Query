@@ -1,16 +1,15 @@
-from dotenv import load_dotenv
+import os
 from PyPDF2 import PdfReader
 import streamlit as st
 from langchain.text_splitter import CharacterTextSplitter
 from langchain.embeddings import HuggingFaceEmbeddings
 from langchain.vectorstores import FAISS
-import requests
-import langchain
+import openai
 import re
 import base64
 
-langchain.verbose = False
-load_dotenv()
+# Load OpenAI API key
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 # Step 1: Process and vectorize PDF text
 def process_text(text):
@@ -41,207 +40,45 @@ def get_prompt_type(query):
     else:
         return "answer"
 
-# Query LLaMA 3.2 via Ollama with improved prompt engineering
-def ask_llama(query, context):
+# Ask OpenAI instead of Ollama
+
+def ask_openai(query, context):
     prompt_type = get_prompt_type(query)
-
     instructions = {
-        "summarize": (
-            "Provide a concise summary of the key points from the context that are relevant to the query. "
-            "Focus only on the most important information. Keep it brief and to the point."
-        ),
-        "explain": (
-            "Explain the concept clearly and in simple terms using only the provided context. "
-            "Break it down into easy-to-understand parts. Provide examples if available in the context."
-        ),
-        "define": (
-            "Give a clear and precise definition based on the context. "
-            "If the context provides multiple aspects, mention the most relevant ones first."
-        ),
-        "answer": (
-            "Provide a direct and accurate answer to the question using only the context. "
-            "If the answer isn't in the context, say 'The answer is not available in the document.' "
-            "Do not make up information."
-        )
+        "summarize": "Summarize the content clearly and concisely.",
+        "explain": "Explain the concept in simple terms using only the context.",
+        "define": "Give a precise definition using only the context.",
+        "answer": "Answer the question strictly based on the context provided. Say 'Not in document' if not found."
     }
-
-    prompt = f"""You are a helpful assistant that provides accurate information based strictly on the given context.
-Follow these instructions carefully:
-1. Only use information from the provided context
-2. Do not add any information not present in the context
-3. If the answer isn't in the context, say so
-4. Be concise and stay focused on the query
-
-{instructions[prompt_type]}
-
-Context:
-{context}
-
-Query: {query}
-
-Response:"""
+    prompt = f"""You are a helpful assistant.\nUse only the information from the context below.\n\n{instructions[prompt_type]}\n\nContext:\n{context}\n\nQuery:\n{query}\n\nAnswer:"""
 
     try:
-        response = requests.post(
-            "http://localhost:11434/api/generate",
-            json={
-                "model": "llama3",
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "temperature": 0.3,
-                    "top_p": 0.9
-                }
-            }
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
         )
-        response_data = response.json()
-        answer = response_data.get("response", "No response from LLaMA.")
-        return answer.strip()
+        return response['choices'][0]['message']['content'].strip()
     except Exception as e:
         return f"Error: {str(e)}"
 
-# PDF Preview Function with pinch-to-zoom
+# PDF Preview Function
 def show_pdf(file):
     pdf_bytes = file.getvalue()
     base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
-    
     pdf_display = f"""
-    <style>
-        .pdf-container {{
-            width: 100%;
-            height: 70vh;
-            overflow: auto;
-            background: #f5f5f5;
-            border: 1px solid #ddd;
-            border-radius: 5px;
-            margin-top: 10px;
-            resize: both;
-            min-width: 300px;
-            min-height: 400px;
-            touch-action: none;
-        }}
-        .pdf-viewer {{
-            width: 100%;
-            height: 100%;
-            border: none;
-            transform-origin: 0 0;
-            transition: transform 0.1s ease;
-        }}
-    </style>
-    
-    <div class="pdf-container" id="pdf-container">
-        <iframe class="pdf-viewer" id="pdf-viewer"
-                src="data:application/pdf;base64,{base64_pdf}#toolbar=0&navpanes=0&scrollbar=1">
-        </iframe>
-    </div>
-    
-    <script>
-        let scale = 1;
-        const container = document.getElementById('pdf-container');
-        const viewer = document.getElementById('pdf-viewer');
-        let lastDistance = 0;
-        
-        // Touch event handlers for pinch zoom
-        container.addEventListener('touchstart', function(e) {{
-            if (e.touches.length === 2) {{
-                e.preventDefault();
-                lastDistance = getDistance(e.touches[0], e.touches[1]);
-            }}
-        }}, {{ passive: false }});
-        
-        container.addEventListener('touchmove', function(e) {{
-            if (e.touches.length === 2) {{
-                e.preventDefault();
-                const newDistance = getDistance(e.touches[0], e.touches[1]);
-                const delta = newDistance - lastDistance;
-                
-                if (Math.abs(delta) > 5) {{  // Threshold to prevent jitter
-                    if (delta > 0) {{
-                        // Pinch out (zoom in)
-                        scale = Math.min(scale + 0.02, 3);
-                    }} else {{
-                        // Pinch in (zoom out)
-                        scale = Math.max(scale - 0.02, 0.5);
-                    }}
-                    viewer.style.transform = `scale(${{scale}})`;
-                    lastDistance = newDistance;
-                }}
-            }}
-        }}, {{ passive: false }});
-        
-        container.addEventListener('touchend', function(e) {{
-            lastDistance = 0;
-        }});
-        
-        // Helper function to calculate distance between two touch points
-        function getDistance(touch1, touch2) {{
-            const dx = touch1.clientX - touch2.clientX;
-            const dy = touch1.clientY - touch2.clientY;
-            return Math.sqrt(dx * dx + dy * dy);
-        }}
-        
-        // Mouse wheel zoom (for non-touch devices)
-        container.addEventListener('wheel', function(e) {{
-            if (e.ctrlKey) {{
-                e.preventDefault();
-                if (e.deltaY < 0) {{
-                    scale = Math.min(scale + 0.1, 3);
-                }} else {{
-                    scale = Math.max(scale - 0.1, 0.5);
-                }}
-                viewer.style.transform = `scale(${{scale}})`;
-            }}
-        }}, {{ passive: false }});
-    </script>
+    <iframe width='100%' height='600' src="data:application/pdf;base64,{base64_pdf}" type="application/pdf" frameborder="0"></iframe>
     """
     st.markdown(pdf_display, unsafe_allow_html=True)
 
 # Streamlit App
 def main():
     st.set_page_config(page_title="Smart PDF Query", layout="wide")
-    st.markdown("""
-        <style>
-        html, body, [class*="css"]  {
-            font-family: 'Segoe UI', sans-serif;
-        }
-        .stButton>button {
-            background-color: #1e3a8a;
-            color: white;
-            padding: 8px 16px;
-            border-radius: 6px;
-            border: none;
-        }
-        .stTextInput>div>div>input {
-            background-color: black;
-        }
-        .stFileUploader {
-            border: 1px solid #ccc;
-            border-radius: 6px;
-            padding: 12px;
-        }
-        /* PDF preview column styling */
-        .pdf-preview-column {{
-            position: sticky;
-            top: 20px;
-            height: 85vh;
-            overflow: hidden;
-            background-color: #f5f5f5;
-            padding: 15px;
-            border-radius: 5px;
-            border: 1px solid #ddd;
-        }}
-        @media (max-width: 1200px) {{
-            .pdf-preview-column {{
-                position: relative;
-                height: 60vh;
-            }}
-        }}
-        </style>
-    """, unsafe_allow_html=True)
-
     st.title("Smart PDF Query")
 
-    # Create columns for layout
     col1, col2 = st.columns([6, 4], gap="medium")
 
     with col1:
@@ -250,9 +87,7 @@ def main():
 
         if pdf is not None:
             try:
-                # Display PDF processing in the main column
                 with st.spinner("Processing PDF..."):
-                    # Reset file pointer to beginning in case it was read before
                     pdf.seek(0)
                     pdf_reader = PdfReader(pdf)
                     text = ""
@@ -283,7 +118,7 @@ def main():
                             st.write(context)
 
                         with st.spinner("Generating response..."):
-                            answer = ask_llama(query, context)
+                            answer = ask_openai(query, context)
 
                             prompt_type = get_prompt_type(query)
                             label_map = {
@@ -298,12 +133,10 @@ def main():
             except Exception as e:
                 st.error(f"Error processing PDF: {str(e)}")
 
-    # PDF Preview Column
     with col2:
         if pdf is not None:
             st.subheader("Document Preview")
             try:
-                # Reset file pointer to beginning before showing preview
                 pdf.seek(0)
                 show_pdf(pdf)
             except Exception as e:
